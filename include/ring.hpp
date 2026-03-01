@@ -49,6 +49,15 @@ namespace lockfree
         {
             return dequeue_bulk(&out, 1) == 1;
         }
+        void flush() noexcept
+        {
+            if (prod_.pending_publish_ > 0)
+            {
+                uint32_t head = prod_.head.load(std::memory_order_relaxed);
+                prod_.tail.store(head, std::memory_order_release);
+                prod_.pending_publish_ = 0;
+            }
+        }
         // BULK ENQUEUE
         std::size_t enqueue_bulk(const T *items, std::size_t n) noexcept
         {
