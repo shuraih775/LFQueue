@@ -1,4 +1,3 @@
-
 ## Design & Inspiration
 
 This project is inspired by the **DPDK `rte_ring`** architecture, focused on achieving:
@@ -8,27 +7,34 @@ This project is inspired by the **DPDK `rte_ring`** architecture, focused on ach
 * **SP/MP & SC/MC** support (Single/Multi-Producer and Consumer).
 * **Bulk API** for high-efficiency enqueue/dequeue.
 
-> **Status:** Optimized for SPSC. MP/MC logic is implemented but currently is not heavily tested.
+> **Status:** Optimized for SPSC. MP/MC logic is being implemented and currently is not tested.
 
 ## Future Optimizations
 
 The following enhancements are planned to further align with DPDK performance standards:
 
-* **Adaptive Batching:** 
-* **Hugepage Support:** 
-* **NUMA Awareness:** 
-* **ARM Neoverse/AArch64:**
+* Analysis and improvements to be done for enqueue/dequeue ops at assembly level w.r.t. `mov` ops to improve the efficiency of moving data in and out of the queue. 
+* **Adaptive Batching** 
+* **Hugepage Support** 
+* **NUMA Awareness** 
+* **ARM Neoverse/AArch64**
+ 
 ---
 
 ## Performance Benchmarks
 
 The following results represent the **average of 10 independent runs** on an HP Laptop 15s. Tests were conducted using 50 million operations per run, with threads pinned to physical cores to ensure consistent inter-core communication.
 
-| Implementation | Avg. Throughput | Performance Gain |
-| --- | --- | --- |
-| **MutexQueue** (Baseline) | **5.04 M ops/sec** | 1x |
-| **Naive Ring Buffer** | **111.09 M ops/sec** | ~22x |
-| **Optimized Ring** | **252.36 M ops/sec** | **~50x** |
+| Implementation | Throughput (M ops/sec) | Avg Latency (Cycles) | P50 Latency | P99 Latency |
+| --- | --- | --- | --- | --- |
+| **MutexQueue** | 4.63 | 2227 | 1775 | 8476 |
+| **NaiveRing** | 124.11 | 66 | 63 | 81 |
+| **LFQueue (Ours)** | **238.29** | **73** | **73** | **84** |
+| **Rigtorp** | 251.10 | 70 | 73 | 84 |
+| **Drogalis** | 265.82 | 71 | 73 | 84 |
+| **Boost SPSC** | 156.45 | 70 | 71 | 84 |
+| **MoodyCamel** | 33.36 | 133 | 126 | 210 |
+
 
 ### Benchmark Configuration
 
@@ -38,10 +44,7 @@ The following results represent the **average of 10 independent runs** on an HP 
 * **Thread Pinning:** Producer (Core 0), Consumer (Core 1) via `taskset`
 * **Build Profile:** `-O3 -march=native -flto` (LTO enabled for cross-module optimization)
 * **Warmup:** 1,000,000 ops prior to measurement to stabilize CPU frequency.
-
-### Analysis
-
-The **Optimized Ring** achieves a **~50x speedup** over the mutex-based implementation. While the Naive Ring suffers from constant cache-line contention (false sharing), the Optimized Ring leverages **Local State Caching** and **Publish Batching** to minimize cache coherency traffic. In optimal conditions, the implementation sustained peaks of **277 M ops/sec**, effectively operating at the theoretical limit of the CPU's L2 cache interconnect.
+* **Power Frequency:** Set to `performance`
 
 ---
 
