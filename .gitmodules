@@ -1,0 +1,9 @@
+[submodule "third_party/rigtorp"]
+	path = third_party/rigtorp
+	url = https://github.com/rigtorp/SPSCQueue.git
+[submodule "third_party/drogalis"]
+	path = third_party/drogalis
+	url = https://github.com/drogalis/SPSC-Queue.git
+[submodule "third_party/moodycamel"]
+	path = third_party/moodycamel
+	url = https://github.com/cameron314/concurrentqueue.git
