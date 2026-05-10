@@ -559,32 +559,189 @@ Planned improvements:
 
 # Running Benchmarks
 
+Build and run the GCC benchmark suite:
+
 ```bash
 make run
+```
+
+Build and run the Clang benchmark suite:
+
+```bash
+make run-clang
 ```
 
 Override CPU placement:
 
 ```bash
-make run PRODUCER_CORE=0 CONSUMER_CORE=2
+make run PRODUCER_CORE=2 CONSUMER_CORE=4
+```
+
+```bash
+make run-clang PRODUCER_CORE=2 CONSUMER_CORE=4
 ```
 
 Using physically separate cores is strongly recommended.
 
----
+Example:
 
+```text
+2 -> 4
+```
+
+Avoid SMT sibling pairs such as:
+
+```text
+0 -> 1
+```
+
+because they share:
+- L1 cache
+- execution resources
+- store buffers
+
+which produces artificially optimistic synchronization results.
+
+---
 # ThreadSanitizer Validation
+
+Build and run ThreadSanitizer validation:
 
 ```bash
 make check-sanity
 ```
 
-Used for:
+ThreadSanitizer is used for:
 - synchronization validation
-- memory-ordering verification
+- memory ordering verification
 - race detection
+- lock-free correctness checking
+
+ASLR is disabled during sanitizer execution for compatibility with modern Linux kernels.
 
 ---
+
+# Assembly & perf Analysis
+
+The project includes dedicated assembly inspection and perf analysis targets for:
+- LFQueue
+- Drogalis
+- Rigtorp
+
+## LFQueue
+
+Generate GCC assembly:
+
+```bash
+make lf-asm
+```
+
+Generate Clang assembly:
+
+```bash
+make lf-asm-clang
+```
+
+Run benchmark:
+
+```bash
+make lf-run
+```
+
+Run perf counters:
+
+```bash
+make perf-lf
+```
+
+Run perf counters using Clang build:
+
+```bash
+make perf-lf-clang
+```
+
+---
+
+## Drogalis
+
+Generate GCC assembly:
+
+```bash
+make dro-asm
+```
+
+Generate Clang assembly:
+
+```bash
+make dro-asm-clang
+```
+
+Run benchmark:
+
+```bash
+make dro-run
+```
+
+Run perf counters:
+
+```bash
+make perf-dro
+```
+
+Run perf counters using Clang build:
+
+```bash
+make perf-dro-clang
+```
+
+---
+
+## Rigtorp
+
+Generate GCC assembly:
+
+```bash
+make rigtorp-asm
+```
+
+Generate Clang assembly:
+
+```bash
+make rigtorp-asm-clang
+```
+
+Run benchmark:
+
+```bash
+make rigtorp-run
+```
+
+Run perf counters:
+
+```bash
+make perf-rigtorp
+```
+
+Run perf counters using Clang build:
+
+```bash
+make perf-rigtorp-clang
+```
+
+---
+
+# What perf Measures
+
+The perf targets collect:
+
+| Counter | Description |
+|---|---|
+| `cycles` | Total CPU cycles consumed |
+| `instructions` | Total retired instructions |
+| `branches` | Number of branch instructions |
+| `branch-misses` | Branch prediction failures |
+| `cache-misses` | Last-level cache miss events |
+
 
 # Conclusion
 
