@@ -5,6 +5,7 @@ template <typename T>
 class BoostSPSCAdapter
 {
 public:
+    using value_type = T;
     explicit BoostSPSCAdapter(size_t capacity)
         : q(capacity) {}
 

@@ -9,6 +9,7 @@ template <typename T>
 class NaiveRing
 {
 public:
+    using value_type = T;
     explicit NaiveRing(size_t size)
         : size_(size),
           mask_(size - 1),

@@ -9,6 +9,7 @@ template <typename T>
 class NaiveMutexQueue
 {
 public:
+    using value_type = T;
     explicit NaiveMutexQueue(std::size_t capacity)
         : capacity_(capacity) {}
 

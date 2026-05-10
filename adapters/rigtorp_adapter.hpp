@@ -5,6 +5,7 @@ template <typename T>
 class RigtorpAdapter
 {
 public:
+    using value_type = T;
     explicit RigtorpAdapter(size_t capacity)
         : q(capacity) {}
 

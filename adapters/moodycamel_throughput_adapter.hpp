@@ -1,10 +1,11 @@
 #pragma once
-#include <concurrentqueue.h>
+#include <blockingconcurrentqueue.h>
 
 template <typename T>
 class MoodyCamelThroughputAdapter
 {
 public:
+    using value_type = T;
     explicit MoodyCamelThroughputAdapter(size_t capacity)
         : q(capacity),
           producer(q),
@@ -22,7 +23,7 @@ public:
     }
 
 private:
-    moodycamel::ConcurrentQueue<T> q;
+    moodycamel::BlockingConcurrentQueue<T> q;
     moodycamel::ProducerToken producer;
     moodycamel::ConsumerToken consumer;
 };

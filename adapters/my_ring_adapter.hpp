@@ -2,15 +2,16 @@
 #include <ring.hpp>
 
 template <typename T>
-class LFQueueThroughputAdapter
+class LFQueueAdapter
 {
 public:
-    explicit LFQueueThroughputAdapter(size_t capacity)
+    using value_type = T;
+    explicit LFQueueAdapter(size_t capacity)
         : q(capacity) {}
 
     bool enqueue(T v)
     {
-        return q.enqueue(v); // no flush
+        return q.enqueue(v);
     }
 
     bool dequeue(T &out)
@@ -19,5 +20,5 @@ public:
     }
 
 private:
-    lockfree::Ring<T> q;
+    lockfree::SPSCQueue<T> q;
 };

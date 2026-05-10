@@ -9,17 +9,12 @@
 #include <type_traits>
 #include <cstring>
 #include <algorithm>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 namespace lockfree
 {
-
-    constexpr std::size_t CACHELINE_SIZE = 64;
-
-    inline bool is_power_of_two(std::size_t x)
-    {
-        return x && ((x & (x - 1)) == 0);
-    }
-
 #if defined(__x86_64__) || defined(__i386__)
     inline void cpu_relax() noexcept
     {
@@ -30,294 +25,399 @@ namespace lockfree
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
-#define LF_ALWAYS_INLINE __attribute__((always_inline)) inline
 #define LF_LIKELY(x) __builtin_expect(!!(x), 1)
 #define LF_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
-#define LF_ALWAYS_INLINE inline
 #define LF_LIKELY(x) (x)
 #define LF_UNLIKELY(x) (x)
 #endif
+#if defined(__GNUC__) || defined(__clang__)
+#define LF_ALWAYS_INLINE __attribute__((always_inline)) inline
+#else
+#define LF_ALWAYS_INLINE inline
+#endif
 
-    template <typename T, bool SingleProducer = true, bool SingleConsumer = true>
-    class Ring
+    constexpr std::size_t CACHELINE_SIZE = 64;
+
+    LF_ALWAYS_INLINE bool is_power_of_two(std::size_t x)
     {
-        static_assert(std::is_trivially_copyable_v<T>,
-                      "Ring<T> requires pointers or trivial types.");
+        return x && ((x & (x - 1)) == 0);
+    }
 
+    template <typename T>
+    class SPSCQueue
+    {
     public:
-        explicit Ring(std::size_t size, uint32_t publish_batch = 32)
-            : size_(static_cast<uint32_t>(size)),
-              mask_(static_cast<uint32_t>(size - 1)),
-              publish_batch_(publish_batch)
+        explicit SPSCQueue(std::size_t size)
+            : size_(static_cast<uint32_t>(size)), mask_(static_cast<uint32_t>(size - 1))
         {
-            if (!is_power_of_two(size_))
+            if (!is_power_of_two(size))
                 throw std::invalid_argument("size must be power of two");
-
-            buffer_ = static_cast<T *>(
-                std::aligned_alloc(CACHELINE_SIZE, sizeof(T) * size_));
-
+            buffer_ = static_cast<T *>(std::aligned_alloc(CACHELINE_SIZE, sizeof(T) * size_));
             if (!buffer_)
                 throw std::bad_alloc();
         }
 
-        ~Ring()
-        {
-            flush();
-            std::free(buffer_);
-        }
+        ~SPSCQueue() { std::free(buffer_); }
 
         LF_ALWAYS_INLINE bool enqueue(const T &item) noexcept
         {
-            return enqueue_bulk(&item, 1) == 1;
+            uint32_t head = prod_head_;
+            uint32_t next = head + 1;
+
+            if (LF_UNLIKELY(next - cached_cons_tail_ > mask_))
+            {
+                cached_cons_tail_ = cons_tail_.load(std::memory_order_acquire);
+                if (LF_UNLIKELY(next - cached_cons_tail_ > mask_))
+                    return false;
+            }
+            uint32_t idx = head & mask_;
+            copy_item(&buffer_[idx], &item);
+
+            prod_head_ = next;
+            prod_tail_.store(next, std::memory_order_release);
+            return true;
         }
 
         LF_ALWAYS_INLINE bool dequeue(T &out) noexcept
         {
-            return dequeue_bulk(&out, 1) == 1;
-        }
-
-        LF_ALWAYS_INLINE void flush() noexcept
-        {
-            if constexpr (SingleProducer)
+            uint32_t head = cons_head_;
+            if (LF_UNLIKELY(head == cached_prod_tail_))
             {
-                if (prod_.pending_publish_ > 0)
-                {
-                    uint32_t head =
-                        prod_.head.load(std::memory_order_relaxed);
-
-                    prod_.tail.store(head, std::memory_order_release);
-                    prod_.pending_publish_ = 0;
-                }
+                cached_prod_tail_ = prod_tail_.load(std::memory_order_acquire);
+                if (LF_UNLIKELY(head == cached_prod_tail_))
+                    return false;
             }
+
+            uint32_t idx = head & mask_;
+            copy_item(&out, &buffer_[idx]);
+
+            uint32_t next = head + 1;
+            cons_head_ = next;
+            cons_tail_.store(next, std::memory_order_release);
+            return true;
         }
 
-        LF_ALWAYS_INLINE std::size_t enqueue_bulk(
-            const T *items,
-            std::size_t n) noexcept
+    private:
+        LF_ALWAYS_INLINE void copy_item(T *dst, const T *src) noexcept
         {
-            if (LF_UNLIKELY(n == 0))
-                return 0;
-
-            uint32_t prod_head;
-
-            if constexpr (SingleProducer)
+#if defined(__AVX2__)
+            if constexpr (sizeof(T) == 32)
             {
-                prod_head = prod_.head.load(std::memory_order_relaxed);
-
-                uint32_t free_entries =
-                    size_ - (prod_head - prod_.cached_cons_tail_);
-
-                if (LF_UNLIKELY(free_entries < n))
-                {
-                    prod_.cached_cons_tail_ =
-                        cons_.tail.load(std::memory_order_acquire);
-
-                    free_entries =
-                        size_ - (prod_head - prod_.cached_cons_tail_);
-
-                    if (LF_UNLIKELY(free_entries < n))
-                        return 0;
-                }
-
-                prod_.head.store(
-                    prod_head + static_cast<uint32_t>(n),
-                    std::memory_order_relaxed);
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
+                                    _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src)));
+            }
+            else if constexpr (sizeof(T) == 64)
+            {
+                auto *d = reinterpret_cast<__m256i *>(dst);
+                auto *s = reinterpret_cast<const __m256i *>(src);
+                _mm256_storeu_si256(d, _mm256_loadu_si256(s));
+                _mm256_storeu_si256(d + 1, _mm256_loadu_si256(s + 1));
             }
             else
             {
-                if (LF_UNLIKELY(!mp_reserve(n, prod_head)))
-                    return 0;
+                *dst = *src;
+            }
+#else
+            *dst = *src;
+#endif
+        }
+        alignas(CACHELINE_SIZE) uint32_t prod_head_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> prod_tail_{0};
+        alignas(CACHELINE_SIZE) uint32_t cons_head_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> cons_tail_{0};
+        alignas(CACHELINE_SIZE) uint32_t cached_cons_tail_{0};
+        alignas(CACHELINE_SIZE) uint32_t cached_prod_tail_{0};
+
+        const uint32_t size_;
+        const uint32_t mask_;
+        alignas(CACHELINE_SIZE) T *buffer_;
+    };
+
+    template <typename T>
+    class SPSCQueueBatch
+    {
+    public:
+        explicit SPSCQueueBatch(std::size_t size, uint32_t publish_batch = 32)
+            : size_(static_cast<uint32_t>(size)),
+              mask_(static_cast<uint32_t>(size - 1)),
+              publish_batch_(publish_batch)
+        {
+            // Align to 32 bytes for AVX instructions
+            buffer_ = static_cast<T *>(std::aligned_alloc(32, sizeof(T) * size_));
+        }
+
+        ~SPSCQueueBatch() { std::free(buffer_); }
+
+        std::size_t enqueue_batch(const T *items, std::size_t n) noexcept
+        {
+            uint32_t head = prod_head_;
+            uint32_t available = size_ - (head - cached_cons_tail_);
+
+            if (LF_UNLIKELY(n > available))
+            {
+                cached_cons_tail_ = cons_tail_.load(std::memory_order_acquire);
+                available = size_ - (head - cached_cons_tail_);
+                if (LF_UNLIKELY(n > available))
+                    n = available;
             }
 
-            uint32_t idx = prod_head & mask_;
+            if (LF_UNLIKELY(n == 0))
+                return 0;
 
-            uint32_t first =
-                std::min<uint32_t>(
-                    size_ - idx,
-                    static_cast<uint32_t>(n));
+            uint32_t idx = head & mask_;
+            uint32_t first = std::min<uint32_t>(size_ - idx, static_cast<uint32_t>(n));
 
-            std::memcpy(
-                &buffer_[idx],
-                items,
-                first * sizeof(T));
-
+            copy_n_nt(&buffer_[idx], items, first);
             if (first < n)
             {
-                std::memcpy(
-                    buffer_,
-                    items + first,
-                    (n - first) * sizeof(T));
+                copy_n_nt(buffer_, items + first, n - first);
             }
 
-            if constexpr (!SingleProducer)
+#if defined(__AVX2__)
+            if constexpr (sizeof(T) == 32 || sizeof(T) == 64)
             {
-                while (prod_.tail.load(std::memory_order_relaxed) != prod_head)
-                    cpu_relax();
+                _mm_sfence();
             }
+#endif
 
-            prod_.pending_publish_ += static_cast<uint32_t>(n);
+            prod_head_ = head + static_cast<uint32_t>(n);
+            pending_publish_ += static_cast<uint32_t>(n);
 
-            if (prod_.pending_publish_ >= publish_batch_)
+            if (pending_publish_ >= publish_batch_)
             {
-                prod_.tail.store(
-                    prod_head + static_cast<uint32_t>(n),
-                    std::memory_order_release);
-
-                prod_.pending_publish_ = 0;
+                prod_tail_.store(prod_head_, std::memory_order_release);
+                pending_publish_ = 0;
             }
 
             return n;
         }
 
-        LF_ALWAYS_INLINE std::size_t dequeue_bulk(
-            T *out,
-            std::size_t n) noexcept
+        std::size_t dequeue_batch(T *out_items, std::size_t n) noexcept
         {
+            uint32_t head = cons_head_;
+            uint32_t available = cached_prod_tail_ - head;
+
+            if (LF_UNLIKELY(n > available))
+            {
+                cached_prod_tail_ = prod_tail_.load(std::memory_order_acquire);
+                available = cached_prod_tail_ - head;
+                if (LF_UNLIKELY(n > available))
+                    n = available;
+            }
+
             if (LF_UNLIKELY(n == 0))
                 return 0;
 
-            uint32_t cons_head;
+            uint32_t idx = head & mask_;
+            uint32_t first = std::min<uint32_t>(size_ - idx, static_cast<uint32_t>(n));
 
-            if constexpr (SingleConsumer)
-            {
-                cons_head = cons_.head.load(std::memory_order_relaxed);
-
-                uint32_t entries =
-                    cons_.cached_prod_tail_ - cons_head;
-
-                if (LF_UNLIKELY(entries < n))
-                {
-                    cons_.cached_prod_tail_ =
-                        prod_.tail.load(std::memory_order_acquire);
-
-                    entries =
-                        cons_.cached_prod_tail_ - cons_head;
-
-                    if (LF_UNLIKELY(entries < n))
-                        return 0;
-                }
-
-                cons_.head.store(
-                    cons_head + static_cast<uint32_t>(n),
-                    std::memory_order_relaxed);
-            }
-            else
-            {
-                if (LF_UNLIKELY(!mc_reserve(n, cons_head)))
-                    return 0;
-            }
-
-            uint32_t idx = cons_head & mask_;
-
-            uint32_t first =
-                std::min<uint32_t>(
-                    size_ - idx,
-                    static_cast<uint32_t>(n));
-
-            std::memcpy(
-                out,
-                &buffer_[idx],
-                first * sizeof(T));
-
+            copy_n_simd(out_items, &buffer_[idx], first);
             if (first < n)
             {
-                std::memcpy(
-                    out + first,
-                    buffer_,
-                    (n - first) * sizeof(T));
+                copy_n_simd(out_items + first, buffer_, n - first);
             }
 
-            if constexpr (!SingleConsumer)
-            {
-                while (cons_.tail.load(std::memory_order_relaxed) != cons_head)
-                    cpu_relax();
-            }
-
-            cons_.tail.store(
-                cons_head + static_cast<uint32_t>(n),
-                std::memory_order_release);
+            cons_head_ = head + static_cast<uint32_t>(n);
+            cons_tail_.store(cons_head_, std::memory_order_release);
 
             return n;
         }
 
     private:
-        bool mp_reserve(std::size_t n, uint32_t &start) noexcept
+        LF_ALWAYS_INLINE void copy_n_nt(T *dst, const T *src, std::size_t n) noexcept
         {
-            while (true)
+#if defined(__AVX2__)
+            if constexpr (sizeof(T) == 32)
             {
-                uint32_t head =
-                    prod_.head.load(std::memory_order_relaxed);
-
-                uint32_t cons_tail =
-                    cons_.tail.load(std::memory_order_acquire);
-
-                if (n > (size_ - (head - cons_tail)))
-                    return false;
-
-                if (prod_.head.compare_exchange_weak(
-                        head,
-                        head + static_cast<uint32_t>(n),
-                        std::memory_order_acq_rel,
-                        std::memory_order_relaxed))
+                for (size_t i = 0; i < n; ++i)
                 {
-                    start = head;
-                    return true;
+                    _mm256_stream_si256(reinterpret_cast<__m256i *>(dst + i),
+                                        _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src + i)));
                 }
+                return;
             }
+#endif
+            std::memcpy(dst, src, n * sizeof(T));
         }
 
-        bool mc_reserve(std::size_t n, uint32_t &start) noexcept
+        LF_ALWAYS_INLINE void copy_n_simd(T *dst, const T *src, std::size_t n) noexcept
         {
-            while (true)
+#if defined(__AVX2__)
+            if constexpr (sizeof(T) == 32)
             {
-                uint32_t head =
-                    cons_.head.load(std::memory_order_relaxed);
-
-                uint32_t prod_tail =
-                    prod_.tail.load(std::memory_order_acquire);
-
-                if (n > (prod_tail - head))
-                    return false;
-
-                if (cons_.head.compare_exchange_weak(
-                        head,
-                        head + static_cast<uint32_t>(n),
-                        std::memory_order_acq_rel,
-                        std::memory_order_relaxed))
+                for (size_t i = 0; i < n; ++i)
                 {
-                    start = head;
-                    return true;
+                    _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + i),
+                                        _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src + i)));
                 }
+                return;
             }
+#endif
+            std::memcpy(dst, src, n * sizeof(T));
         }
 
-        struct alignas(CACHELINE_SIZE) Prod
-        {
-            std::atomic<uint32_t> head{0};
-            std::atomic<uint32_t> tail{0};
+        alignas(64) uint32_t prod_head_{0};
+        uint32_t cached_cons_tail_{0};
+        uint32_t pending_publish_{0};
+        alignas(64) std::atomic<uint32_t> prod_tail_{0};
 
-            uint32_t cached_cons_tail_{0};
-            uint32_t pending_publish_{0};
-
-        } prod_;
-
-        struct alignas(CACHELINE_SIZE) Cons
-        {
-            std::atomic<uint32_t> head{0};
-            std::atomic<uint32_t> tail{0};
-
-            uint32_t cached_prod_tail_{0};
-
-        } cons_;
+        alignas(64) uint32_t cons_head_{0};
+        uint32_t cached_prod_tail_{0};
+        alignas(64) std::atomic<uint32_t> cons_tail_{0};
 
         const uint32_t size_;
         const uint32_t mask_;
         const uint32_t publish_batch_;
+        T *buffer_;
+    };
+    template <typename T>
+    class MPMCQueue
+    {
+    public:
+        explicit MPMCQueue(std::size_t size)
+            : size_(static_cast<uint32_t>(size)), mask_(static_cast<uint32_t>(size - 1))
+        {
+            buffer_ = static_cast<T *>(std::aligned_alloc(CACHELINE_SIZE, sizeof(T) * size_));
+        }
 
+        ~MPMCQueue() { std::free(buffer_); }
+
+        LF_ALWAYS_INLINE bool enqueue(const T &item) noexcept
+        {
+            uint32_t head;
+            while (true)
+            {
+                head = prod_head_atomic_.load(std::memory_order_relaxed);
+                uint32_t cons_tail = cons_tail_.load(std::memory_order_acquire);
+                if (1 > (size_ - (head - cons_tail)))
+                    return false;
+
+                if (prod_head_atomic_.compare_exchange_weak(head, head + 1,
+                                                            std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
+            }
+
+            buffer_[head & mask_] = item;
+            while (prod_tail_.load(std::memory_order_relaxed) != head)
+                cpu_relax();
+            prod_tail_.store(head + 1, std::memory_order_release);
+            return true;
+        }
+
+        LF_ALWAYS_INLINE bool dequeue(T &out) noexcept
+        {
+            uint32_t head;
+            while (true)
+            {
+                head = cons_head_atomic_.load(std::memory_order_relaxed);
+                uint32_t prod_tail = prod_tail_.load(std::memory_order_acquire);
+                if (1 > (prod_tail - head))
+                    return false;
+
+                if (cons_head_atomic_.compare_exchange_weak(head, head + 1,
+                                                            std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
+            }
+
+            while (cons_tail_.load(std::memory_order_relaxed) != head)
+                cpu_relax();
+            out = buffer_[head & mask_];
+            cons_tail_.store(head + 1, std::memory_order_release);
+            return true;
+        }
+
+    private:
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> prod_head_atomic_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> prod_tail_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> cons_head_atomic_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> cons_tail_{0};
+
+        const uint32_t size_;
+        const uint32_t mask_;
         T *buffer_;
     };
 
-}
+    template <typename T>
+    class MPMCQueueBatch
+    {
+    public:
+        explicit MPMCQueueBatch(std::size_t size)
+            : size_(static_cast<uint32_t>(size)), mask_(static_cast<uint32_t>(size - 1))
+        {
+            buffer_ = static_cast<T *>(std::aligned_alloc(CACHELINE_SIZE, sizeof(T) * size_));
+        }
+
+        ~MPMCQueueBatch() { std::free(buffer_); }
+
+        inline std::size_t enqueue_batch(const T *items, std::size_t n) noexcept
+        {
+            uint32_t head;
+            std::size_t actual_n;
+            while (true)
+            {
+                head = prod_head_atomic_.load(std::memory_order_relaxed);
+                uint32_t cons_tail = cons_tail_.load(std::memory_order_acquire);
+                uint32_t available = size_ - (head - cons_tail);
+                actual_n = (n > available) ? available : n;
+                if (actual_n == 0)
+                    return 0;
+
+                if (prod_head_atomic_.compare_exchange_weak(head, head + actual_n,
+                                                            std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
+            }
+
+            for (std::size_t i = 0; i < actual_n; ++i)
+            {
+                buffer_[(head + i) & mask_] = items[i];
+            }
+
+            while (prod_tail_.load(std::memory_order_relaxed) != head)
+                cpu_relax();
+            prod_tail_.store(head + actual_n, std::memory_order_release);
+            return actual_n;
+        }
+
+        inline std::size_t dequeue_batch(T *out_items, std::size_t n) noexcept
+        {
+            uint32_t head;
+            std::size_t actual_n;
+            while (true)
+            {
+                head = cons_head_atomic_.load(std::memory_order_relaxed);
+                uint32_t prod_tail = prod_tail_.load(std::memory_order_acquire);
+                uint32_t available = prod_tail - head;
+                actual_n = (n > available) ? available : n;
+                if (actual_n == 0)
+                    return 0;
+
+                if (cons_head_atomic_.compare_exchange_weak(head, head + actual_n,
+                                                            std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
+            }
+
+            while (cons_tail_.load(std::memory_order_relaxed) != head)
+                cpu_relax();
+            for (std::size_t i = 0; i < actual_n; ++i)
+            {
+                out_items[i] = buffer_[(head + i) & mask_];
+            }
+            cons_tail_.store(head + actual_n, std::memory_order_release);
+            return actual_n;
+        }
+
+    private:
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> prod_head_atomic_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> prod_tail_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> cons_head_atomic_{0};
+        alignas(CACHELINE_SIZE) std::atomic<uint32_t> cons_tail_{0};
+
+        const uint32_t size_;
+        const uint32_t mask_;
+        T *buffer_;
+    };
+
+} // namespace lockfree
 
 #endif

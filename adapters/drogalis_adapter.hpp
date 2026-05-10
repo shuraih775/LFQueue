@@ -5,6 +5,7 @@ template <typename T>
 class DrogalisAdapter
 {
 public:
+    using value_type = T;
     explicit DrogalisAdapter(size_t capacity)
         : q(capacity) {}
 
