@@ -41,6 +41,7 @@ Current status:
 
 Benchmarks were run on physically separate cores (`2 -> 4`) with thread pinning enabled.
 
+## Throughput
 Median throughput across 10 runs:
 
 | Payload | LFQueue   | Drogalis | Rigtorp | BoostSPSC |
@@ -55,9 +56,24 @@ Median throughput across 10 runs:
 
 Units: M ops/sec
 
----
+## Latency
 
-# Batch Throughput
+Measured using `rdtscp` ping-pong benchmarks on pinned physical cores (`2 -> 4`). (avg of 10 runs)
+
+Median latency (cycles):
+
+| Payload | LFQueue | Drogalis | Rigtorp |
+| ------- | ------- | -------- | ------- |
+| 2B      | 528     | 512      | 508     |
+| 4B      | 520     | 501      | 504     |
+| 8B      | 527     | 503      | 506     |
+| 16B     | 525     | 518      | 516     |
+| 32B     | 368     | 368      | 367     |
+| 64B     | 390     | 388      | 389     |
+
+
+
+## Batch Throughput (for lfqueue)
 
 | Benchmark             | Result              |
 | --------------------- | ------------------- |
@@ -65,9 +81,8 @@ Units: M ops/sec
 | Best Burst Sweep      | **582.3 M ops/sec** |
 | Best Publish Interval | **681.2 M ops/sec** |
 
----
 
-# Benchmark Environment
+## Benchmark Environment
 
 | Setting        | Value                            |
 | -------------- | -------------------------------- |
