@@ -98,6 +98,12 @@ namespace lockfree
             return true;
         }
 
+        LF_ALWAYS_INLINE uint32_t size() const noexcept
+        {
+            return prod_tail_.load(std::memory_order_acquire) -
+                   cons_tail_.load(std::memory_order_acquire);
+        }
+
     private:
         LF_ALWAYS_INLINE void copy_item(T *dst, const T *src) noexcept
         {
@@ -224,6 +230,24 @@ namespace lockfree
             return n;
         }
 
+        LF_ALWAYS_INLINE uint32_t size() const noexcept
+        {
+            return prod_tail_.load(std::memory_order_acquire) -
+                   cons_tail_.load(std::memory_order_acquire);
+        }
+        LF_ALWAYS_INLINE void flush() noexcept
+        {
+            if (pending_publish_ == 0)
+                return;
+
+#if defined(__AVX2__)
+            _mm_sfence();
+#endif
+
+            prod_tail_.store(prod_head_, std::memory_order_release);
+            pending_publish_ = 0;
+        }
+
     private:
         LF_ALWAYS_INLINE void copy_n_nt(T *dst, const T *src, std::size_t n) noexcept
         {
@@ -255,19 +279,6 @@ namespace lockfree
             }
 #endif
             std::memcpy(dst, src, n * sizeof(T));
-        }
-
-        LF_ALWAYS_INLINE void flush() noexcept
-        {
-            if (pending_publish_ == 0)
-                return;
-
-#if defined(__AVX2__)
-            _mm_sfence();
-#endif
-
-            prod_tail_.store(prod_head_, std::memory_order_release);
-            pending_publish_ = 0;
         }
 
         alignas(64) uint32_t prod_head_{0};
