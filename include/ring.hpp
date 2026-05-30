@@ -257,6 +257,19 @@ namespace lockfree
             std::memcpy(dst, src, n * sizeof(T));
         }
 
+        LF_ALWAYS_INLINE void flush() noexcept
+        {
+            if (pending_publish_ == 0)
+                return;
+
+#if defined(__AVX2__)
+            _mm_sfence();
+#endif
+
+            prod_tail_.store(prod_head_, std::memory_order_release);
+            pending_publish_ = 0;
+        }
+
         alignas(64) uint32_t prod_head_{0};
         uint32_t cached_cons_tail_{0};
         uint32_t pending_publish_{0};
